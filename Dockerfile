@@ -4,6 +4,7 @@ LABEL maintainer=eryajf
 
 ENV TZ=Asia/Shanghai
 ENV BINARY_NAME=zenops
+ENV GIN_MODE=release
 
 RUN sed -i "s/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g" /etc/apk/repositories \
     && apk upgrade \

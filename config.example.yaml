@@ -38,7 +38,7 @@ cicd:
 
 # 钉钉配置
 dingtalk:
-  enabled: true
+  enabled: false  # 默认禁用,请在管理页面配置后启用
   # 钉钉应用凭证
   app_key: "YOUR_DINGTALK_APP_KEY"
   app_secret: "YOUR_DINGTALK_APP_SECRET"
@@ -73,6 +73,7 @@ server:
   http:
     enabled: true
     port: 8080
+    debug: true  # Gin 调试模式,本地开发建议 true,生产环境通过环境变量 GIN_MODE=release 覆盖
 
   # MCP 服务配置
   mcp:

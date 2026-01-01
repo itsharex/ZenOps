@@ -99,6 +99,7 @@ func setDefaults(v *viper.Viper) {
 	// Server 默认配置
 	v.SetDefault("server.http.enabled", true)
 	v.SetDefault("server.http.port", 8080)
+	v.SetDefault("server.http.debug", true) // 默认开启 Debug 模式,适合本地开发
 	v.SetDefault("server.mcp.enabled", false)
 	v.SetDefault("server.mcp.port", 8081)
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -34,7 +35,10 @@ type HTTPGinServer struct {
 // NewHTTPGinServer 创建基于 Gin 的 HTTP 服务器
 func NewHTTPGinServer(cfg *config.Config) *HTTPGinServer {
 	// 设置 Gin 模式
-	if cfg.Server.HTTP.Debug {
+	// 优先使用环境变量 GIN_MODE，如果未设置则使用配置文件
+	if ginMode := os.Getenv("GIN_MODE"); ginMode != "" {
+		gin.SetMode(ginMode)
+	} else if cfg.Server.HTTP.Debug {
 		gin.SetMode(gin.DebugMode)
 	} else {
 		gin.SetMode(gin.ReleaseMode)
