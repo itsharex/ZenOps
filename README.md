@@ -28,6 +28,7 @@ ZenOps 是一个面向运维领域的数据智能化查询工具，通过统一�
 - **插件化架构**: 易于扩展新的云平台和服务
 
 > 📝 快速入门上手文档：[开源项目ZenOps：带你领略禅意运维](https://wiki.eryajf.net/pages/a908c5/) ，详细介绍了mcp，钉钉，飞书，企微等联动使用的配置方法。
+> 2026-01-01日更新：可直接使用下边快速开始的docker命令进行部署使用。
 
 ---
 
@@ -42,25 +43,15 @@ ZenOps 是一个面向运维领域的数据智能化查询工具，通过统一�
 ### 安装
 
 ```bash
-# 克隆仓库
-git clone https://github.com/eryajf/zenops.git
-cd zenops
-
-# 编译
-make build
+# 直接使用docker部署
+docker run -itd --name zenops -p 8080:8080 -p 8081:8081 -v ./data:/app/data  docker.cnb.cool/opsre/zenops
 ```
 
-也可以直接下载预编译的二进制文件，或者使用 docker 运行。
+运行启动之后，可以通过 http://localhost:8080 访问前端页面，默认管理员账号密码为：`admin/admin123`
 
-### 配置
+然后可以在管理后台先在系统设置中配置LLM，IM，云厂商秘钥等几项配置项，即可进行页面上的对话调试。
 
-复制配置文件模板并修改:
-
-```bash
-cp config.example.yaml config.yaml
-```
-
-按需配置其中的各配置项。
+目前外部MCP支持在后台页面上配置，可直接在页面上配置使用，启用之后，自动会应用，可以在页面对话中进行调试。
 
 ### 使用
 
@@ -103,6 +94,12 @@ cp config.example.yaml config.yaml
 | :------: | :------------------------------------------: |
 |  `CNB`  | <https://cnb.cool/opsre/ZenOps>  |
 | `GitHub` | <https://github.com/opsre/ZenOps> |
+
+## 交流群
+
+如果你有任何问题或者建议，欢迎加入我们的交流群，一块儿交流使用经验与想法！
+
+![](https://t.eryajf.net/imgs/2026/01/1767279508482.webp)
 
 ## 捐赠打赏
 
