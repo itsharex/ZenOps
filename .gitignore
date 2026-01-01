@@ -13,6 +13,8 @@ zenops
 # Output of the go coverage tool
 *.out
 coverage.html
+zenops.db
+zenops-web
 
 # Go workspace file
 go.work
@@ -40,3 +42,6 @@ logs/
 # Temporary files
 tmp/
 temp/
+node_modules/
+dist/
+data/

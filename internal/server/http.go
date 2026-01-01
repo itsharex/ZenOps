@@ -3,26 +3,32 @@ package server
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"net/http"
+	"strings"
 	"time"
 
 	"cnb.cool/zhiqiangwang/pkg/logx"
 	"github.com/eryajf/zenops/internal/config"
 	"github.com/eryajf/zenops/internal/imcp"
+	"github.com/eryajf/zenops/internal/middleware"
 	"github.com/eryajf/zenops/internal/model"
 	"github.com/eryajf/zenops/internal/provider"
 	aliyunprovider "github.com/eryajf/zenops/internal/provider/aliyun"
 	"github.com/eryajf/zenops/internal/wecom"
+	"github.com/eryajf/zenops/web"
 	"github.com/gin-gonic/gin"
 )
 
 // HTTPGinServer 基于 Gin 的 HTTP 服务器
 type HTTPGinServer struct {
-	config        *config.Config
-	engine        *gin.Engine
-	server        *http.Server
-	mcpServer     *imcp.MCPServer
-	wecomHandler  *wecom.MessageHandler
+	config         *config.Config
+	engine         *gin.Engine
+	server         *http.Server
+	mcpServer      *imcp.MCPServer
+	wecomHandler   *wecom.MessageHandler
+	serviceManager *ServiceManager
+	chatHandler    *ChatHandler
 }
 
 // NewHTTPGinServer 创建基于 Gin 的 HTTP 服务器
@@ -55,6 +61,15 @@ func NewHTTPGinServer(cfg *config.Config) *HTTPGinServer {
 func (s *HTTPGinServer) SetMCPServer(mcpServer *imcp.MCPServer) {
 	s.mcpServer = mcpServer
 
+	// 创建服务管理器
+	s.serviceManager = NewServiceManager(s.config, mcpServer)
+
+	// 创建 ChatHandler（需要 mcpServer）
+	s.chatHandler = NewChatHandler(s.config, mcpServer)
+
+	// 注册 AI 对话路由（需要在 mcpServer 设置后）
+	s.registerChatRoutes()
+
 	// 如果启用了企业微信,初始化消息处理器
 	if s.config.Wecom.Enabled {
 		handler, err := wecom.NewMessageHandler(s.config, mcpServer)
@@ -65,6 +80,21 @@ func (s *HTTPGinServer) SetMCPServer(mcpServer *imcp.MCPServer) {
 			logx.Info("Wecom message handler initialized")
 		}
 	}
+
+	// 注册服务管理路由
+	s.registerServiceRoutes()
+
+	// 从数据库同步并启动已启用的 IM 服务
+	go func() {
+		if err := s.serviceManager.SyncWithDatabase(context.Background()); err != nil {
+			logx.Error("Failed to sync IM services from database: %v", err)
+		}
+	}()
+}
+
+// GetServiceManager 获取服务管理器
+func (s *HTTPGinServer) GetServiceManager() *ServiceManager {
+	return s.serviceManager
 }
 
 // registerMiddlewares 注册中间件
@@ -129,6 +159,29 @@ func (s *HTTPGinServer) registerRoutes() {
 		// 健康检查
 		v1.GET("/health", s.handleHealth)
 
+		// 版本信息
+		v1.GET("/version", GetVersionInfo)
+
+		// 用户认证路由
+		authHandler := NewAuthHandler()
+		userHandler := NewUserHandler()
+
+		// 公开路由 (不需要认证)
+		auth := v1.Group("/auth")
+		{
+			auth.POST("/login", authHandler.Login)
+			auth.POST("/logout", authHandler.Logout)
+		}
+
+		// 需要认证的用户路由
+		user := v1.Group("/user")
+		user.Use(middleware.AuthMiddleware())
+		{
+			user.GET("/info", authHandler.GetUserInfo)
+			user.GET("/menu/list", userHandler.GetMenuList)
+			user.POST("/change-password", authHandler.ChangePassword)
+		}
+
 		// 阿里云路由
 		aliyun := v1.Group("/aliyun")
 		{
@@ -170,7 +223,189 @@ func (s *HTTPGinServer) registerRoutes() {
 			jenkins.GET("/job/get", s.handleJenkinsJobGet)
 			jenkins.GET("/build/list", s.handleJenkinsBuildList)
 		}
+
+		// MCP Server 管理路由 (独立路由组)
+		configHandler := NewConfigHandler()
+		mcpHandler := NewMCPHandler()
+		mcp := v1.Group("/mcp")
+		{
+			mcp.GET("/servers", configHandler.ListMCPServers)
+			mcp.POST("/servers", configHandler.CreateMCPServer)
+			mcp.GET("/servers/:name", configHandler.GetMCPServerByName)
+			mcp.PUT("/servers/:name", configHandler.UpdateMCPServerByName)
+			mcp.DELETE("/servers/:name", configHandler.DeleteMCPServerByName)
+			mcp.PATCH("/servers/:name/toggle", configHandler.ToggleMCPServer)
+			mcp.GET("/servers/:name/tools", configHandler.GetMCPTools)
+			mcp.PATCH("/servers/:name/tools/:toolName/toggle", configHandler.ToggleMCPTool)
+			mcp.POST("/servers/:name/tools/:toolName/test", configHandler.TestMCPTool)
+			// MCP 调试接口
+			mcp.POST("/debug/execute", mcpHandler.DebugExecute)
+		}
+
+		// 仪表盘路由
+		dashboardHandler := NewDashboardHandler()
+		dashboard := v1.Group("/dashboard")
+		{
+			dashboard.GET("/stats", dashboardHandler.GetStats)
+			dashboard.GET("/health", dashboardHandler.GetHealth)
+		}
+
+		// 日志路由
+		logHandler := NewLogHandler()
+		logs := v1.Group("/logs")
+		{
+			logs.GET("/mcp", logHandler.GetMCPLogs)
+			logs.GET("/mcp/stats", logHandler.GetMCPLogStats)
+		}
+
+		// AI 对话路由将在 SetMCPServer() 中注册（需要 mcpServer）
+
+		// 对话历史路由
+		historyHandler := NewHistoryHandler()
+		history := v1.Group("/history")
+		{
+			history.GET("/chats", historyHandler.GetChatLogs)
+			history.GET("/chats/:id/context", historyHandler.GetChatContext)
+		}
+
+		// 会话管理路由
+		conversationHandler := NewConversationHandler()
+		conversations := v1.Group("/conversations")
+		{
+			conversations.POST("", conversationHandler.CreateConversation)
+			conversations.GET("", conversationHandler.ListConversations)
+			conversations.GET("/:id", conversationHandler.GetConversation)
+			conversations.PUT("/:id", conversationHandler.UpdateConversation)
+			conversations.DELETE("/:id", conversationHandler.DeleteConversation)
+		}
+
+		// 配置管理路由
+		config := v1.Group("/config")
+		{
+			// 全量配置
+			config.GET("", configHandler.GetAllConfig)
+			// LLM 配置 (RESTful 风格)
+			config.GET("/llm", configHandler.ListLLMConfigs)
+			config.POST("/llm", configHandler.CreateLLMConfig)
+			config.GET("/llm/:id", configHandler.GetLLMConfig)
+			config.PUT("/llm/:id", configHandler.UpdateLLMConfig)
+			config.DELETE("/llm/:id", configHandler.DeleteLLMConfig)
+			config.PATCH("/llm/:id/toggle", configHandler.ToggleLLMConfig)
+
+			// 云厂商账号配置 (改为单数 provider)
+			config.GET("/provider", configHandler.ListProviderAccounts)
+			config.POST("/provider", configHandler.CreateProviderAccount)
+			config.GET("/provider/:id", configHandler.GetProviderAccount)
+			config.PUT("/provider/:id", configHandler.UpdateProviderAccount)
+			config.DELETE("/provider/:id", configHandler.DeleteProviderAccount)
+
+			// IM 配置 (添加 integration 别名)
+			config.GET("/integration", configHandler.ListIntegrationConfigs)
+			config.POST("/integration", configHandler.CreateIntegrationConfig)
+			config.GET("/integration/:id", configHandler.GetIntegrationConfig)
+			config.PUT("/integration/:id", configHandler.UpdateIntegrationConfig)
+			config.DELETE("/integration/:id", configHandler.DeleteIntegrationConfig)
+
+			// CICD 配置
+			config.GET("/cicd", configHandler.ListCICDConfigs)
+			config.GET("/cicd/:platform", configHandler.GetCICDConfig)
+			config.PUT("/cicd/:platform", configHandler.SaveCICDConfig)
+
+			// Jenkins 配置便捷路由
+			config.GET("/jenkins", configHandler.GetJenkinsConfig)
+			config.POST("/jenkins", configHandler.SaveJenkinsConfig)
+
+			// 服务器配置
+			config.GET("/server", configHandler.GetServerConfig)
+			config.POST("/server", configHandler.SaveServerConfig)
+
+			// 系统配置
+			config.GET("/system", configHandler.ListSystemConfigs)
+			config.GET("/system/:key", configHandler.GetSystemConfig)
+			config.POST("/system", configHandler.SetSystemConfig)
+		}
 	}
+
+	// 前端静态文件服务 (SPA 模式)
+	s.registerStaticFiles()
+}
+
+// registerChatRoutes 注册 AI 对话路由（需要在 SetMCPServer 之后调用）
+func (s *HTTPGinServer) registerChatRoutes() {
+	if s.chatHandler == nil {
+		logx.Warn("ChatHandler is nil, skipping chat routes registration")
+		return
+	}
+
+	// AI 对话路由
+	v1 := s.engine.Group("/api/v1")
+	chat := v1.Group("/chat")
+	{
+		chat.POST("/completions", s.chatHandler.Completions)
+		chat.GET("/models", s.chatHandler.GetModels)
+	}
+
+	logx.Info("✅ Chat routes registered successfully")
+}
+
+// registerServiceRoutes 注册服务管理路由
+func (s *HTTPGinServer) registerServiceRoutes() {
+	if s.serviceManager == nil {
+		logx.Warn("ServiceManager is nil, skipping service routes registration")
+		return
+	}
+
+	serviceHandler := NewServiceHandler(s.serviceManager)
+
+	// 服务管理路由
+	services := s.engine.Group("/api/v1/services")
+	{
+		services.GET("/status", serviceHandler.GetServiceStatus)
+		services.GET("/status/:platform", serviceHandler.GetPlatformStatus)
+		services.POST("/toggle/:platform", serviceHandler.ToggleIMService)
+	}
+}
+
+// registerStaticFiles 注册前端静态文件服务
+func (s *HTTPGinServer) registerStaticFiles() {
+	// 获取嵌入的前端文件系统
+	distFS := web.GetFS()
+	subFS, err := fs.Sub(distFS, "dist")
+	if err != nil {
+		logx.Error("Failed to get embedded frontend files: %v", err)
+		return
+	}
+
+	// 静态文件服务器
+	fileServer := http.FileServer(http.FS(subFS))
+
+	// 处理所有非 API 请求
+	s.engine.NoRoute(func(c *gin.Context) {
+		path := c.Request.URL.Path
+
+		// 如果是 API 请求，返回 404
+		if strings.HasPrefix(path, "/api/") {
+			c.JSON(http.StatusNotFound, Response{
+				Code:    404,
+				Message: "API not found",
+			})
+			return
+		}
+
+		// 尝试直接提供静态文件
+		// 检查文件是否存在
+		f, err := subFS.Open(strings.TrimPrefix(path, "/"))
+		if err == nil {
+			f.Close()
+			// 文件存在，直接提供
+			fileServer.ServeHTTP(c.Writer, c.Request)
+			return
+		}
+
+		// 文件不存在，返回 index.html (SPA 模式)
+		c.Request.URL.Path = "/"
+		fileServer.ServeHTTP(c.Writer, c.Request)
+	})
 }
 
 // Start 启动 HTTP 服务器
@@ -566,7 +801,9 @@ func (s *HTTPGinServer) handleAliyunOSSList(c *gin.Context) {
 	}
 
 	// 创建临时客户端
-	var ossClient interface{ ListOSSBuckets(context.Context, int, int, map[string]string) ([]*model.OSSBucket, error) }
+	var ossClient interface {
+		ListOSSBuckets(context.Context, int, int, map[string]string) ([]*model.OSSBucket, error)
+	}
 	for _, region := range aliyunConfig.Regions {
 		c, err := createAliyunClient(aliyunConfig.AK, aliyunConfig.SK, region)
 		if err == nil {
@@ -621,7 +858,9 @@ func (s *HTTPGinServer) handleAliyunOSSGet(c *gin.Context) {
 	}
 
 	// 创建临时客户端
-	var ossClient interface{ GetOSSBucket(context.Context, string) (*model.OSSBucket, error) }
+	var ossClient interface {
+		GetOSSBucket(context.Context, string) (*model.OSSBucket, error)
+	}
 	for _, region := range aliyunConfig.Regions {
 		c, err := createAliyunClient(aliyunConfig.AK, aliyunConfig.SK, region)
 		if err == nil {
@@ -1253,7 +1492,9 @@ func createAliyunClient(ak, sk, region string) (*aliyunprovider.Client, error) {
 
 // handleWecomVerify 处理企业微信URL验证
 func (s *HTTPGinServer) handleWecomVerify(c *gin.Context) {
-	if s.wecomHandler == nil {
+	// 优先从 ServiceManager 获取 handler
+	handler := s.getWecomHandler()
+	if handler == nil {
 		s.error(c, http.StatusServiceUnavailable, "Wecom handler not initialized")
 		return
 	}
@@ -1265,7 +1506,7 @@ func (s *HTTPGinServer) handleWecomVerify(c *gin.Context) {
 
 	logx.Info("Wecom verify request: signature=%s, timestamp=%s, nonce=%s", signature, timestamp, nonce)
 
-	replyEchoStr, err := s.wecomHandler.Client.VerifyURL(signature, timestamp, nonce, echoStr)
+	replyEchoStr, err := handler.Client.VerifyURL(signature, timestamp, nonce, echoStr)
 	if err != nil {
 		logx.Error("Failed to verify Wecom URL: %v", err)
 		s.error(c, http.StatusBadRequest, fmt.Sprintf("Verification failed: %v", err))
@@ -1277,7 +1518,9 @@ func (s *HTTPGinServer) handleWecomVerify(c *gin.Context) {
 
 // handleWecomMessage 处理企业微信消息回调
 func (s *HTTPGinServer) handleWecomMessage(c *gin.Context) {
-	if s.wecomHandler == nil {
+	// 优先从 ServiceManager 获取 handler
+	handler := s.getWecomHandler()
+	if handler == nil {
 		s.error(c, http.StatusServiceUnavailable, "Wecom handler not initialized")
 		return
 	}
@@ -1298,7 +1541,7 @@ func (s *HTTPGinServer) handleWecomMessage(c *gin.Context) {
 		signature, timestamp, nonce, string(body))
 
 	// 解密消息
-	req, err := s.wecomHandler.Client.DecryptUserReq(signature, timestamp, nonce, string(body))
+	req, err := handler.Client.DecryptUserReq(signature, timestamp, nonce, string(body))
 	if err != nil {
 		logx.Error("Failed to decrypt Wecom message: %v", err)
 		c.String(http.StatusOK, "") // 企业微信要求返回200
@@ -1312,7 +1555,7 @@ func (s *HTTPGinServer) handleWecomMessage(c *gin.Context) {
 	switch req.Msgtype {
 	case "text":
 		// 处理文本消息
-		response, err = s.wecomHandler.HandleTextMessage(ctx, req)
+		response, err = handler.HandleTextMessage(ctx, req)
 		if err != nil {
 			logx.Error("Failed to handle text message: %v", err)
 			c.String(http.StatusOK, "")
@@ -1321,7 +1564,7 @@ func (s *HTTPGinServer) handleWecomMessage(c *gin.Context) {
 
 	case "stream":
 		// 处理流式轮询请求
-		response, err = s.wecomHandler.HandleStreamRequest(ctx, req)
+		response, err = handler.HandleStreamRequest(ctx, req)
 		if err != nil {
 			logx.Error("Failed to handle stream request: %v", err)
 			c.String(http.StatusOK, "")
@@ -1337,4 +1580,16 @@ func (s *HTTPGinServer) handleWecomMessage(c *gin.Context) {
 	// 返回加密响应
 	c.Header("Content-Type", "application/json")
 	c.String(http.StatusOK, response)
+}
+
+// getWecomHandler 获取企业微信处理器（优先从 ServiceManager 获取）
+func (s *HTTPGinServer) getWecomHandler() *wecom.MessageHandler {
+	// 优先从 ServiceManager 获取
+	if s.serviceManager != nil {
+		if handler := s.serviceManager.GetWecomHandler(); handler != nil {
+			return handler
+		}
+	}
+	// 回退到本地 handler
+	return s.wecomHandler
 }

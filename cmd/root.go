@@ -88,6 +88,9 @@ var runCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		logx.Info("🧘 Starting ZenOps Server, Version %s", Version)
 
+		// 初始化版本信息处理器
+		server.InitVersionHandler(Version, GitCommit, BuildTime)
+
 		// 检查 flag 冲突
 		if httpOnly && mcpOnly {
 			return fmt.Errorf("--http-only 和 --mcp-only 不能同时使用")
@@ -123,7 +126,16 @@ var runCmd = &cobra.Command{
 		// 1. 创建 MCP 客户端管理器
 		mcpClientManager := mcpclient.NewManager()
 
-		// 2. 加载外部 MCP 配置
+		// 设置为全局 MCP 管理器,供 HTTP API 使用
+		server.SetGlobalMCPManager(mcpClientManager)
+
+		// 2. 从数据库加载并连接已启用的 MCP 服务器
+		logx.Info("🗄️  Loading MCP servers from database...")
+		if err := server.InitializeMCPServersFromDB(ctx, mcpClientManager); err != nil {
+			logx.Warn("⚠️  Failed to initialize MCP servers from database: %v", err)
+		}
+
+		// 3. 加载外部 MCP 配置文件 (兼容旧配置方式)
 		if cfg.MCPServersConfig != "" {
 			logx.Info("📥 Loading external MCP servers from: %s", cfg.MCPServersConfig)
 			mcpServersConfig, err := config.LoadMCPServersConfig(cfg.MCPServersConfig)
@@ -137,10 +149,10 @@ var runCmd = &cobra.Command{
 			}
 		}
 
-		// 3. 创建 MCP 服务器 (钉钉和飞书共享)
+		// 4. 创建 MCP 服务器 (钉钉和飞书共享)
 		mcpServer := imcp.NewMCPServer(cfg)
 
-		// 4. 注册外部 MCP 的工具 (如果启用)
+		// 5. 注册外部 MCP 的工具 (如果启用)
 		if cfg.Server.MCP.AutoRegisterExternalTools {
 			logx.Info("🔧 Registering external MCP tools...")
 			if err := mcpServer.RegisterExternalMCPTools(ctx, mcpClientManager); err != nil {

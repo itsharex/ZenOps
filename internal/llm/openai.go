@@ -349,22 +349,32 @@ func (c *OpenAIClient) Chat(ctx context.Context, req *ChatRequest) (*ChatRespons
 
 // ChatWithToolsAndStream 支持工具调用的流式对话(Client 方法)
 func (c *Client) ChatWithToolsAndStream(ctx context.Context, userMessage string) (<-chan string, error) {
+	// 为了向后兼容，将单个消息转换为消息列表
+	messages := []Message{
+		{
+			Role:    "user",
+			Content: userMessage,
+		},
+	}
+	return c.ChatWithToolsAndStreamMessages(ctx, messages)
+}
+
+// ChatWithToolsAndStreamMessages 使用完整的消息历史与 LLM 对话
+func (c *Client) ChatWithToolsAndStreamMessages(ctx context.Context, historyMessages []Message) (<-chan string, error) {
 	responseCh := make(chan string, 100)
 
 	go func() {
 		defer close(responseCh)
 
-		// 构建消息
+		// 构建完整的消息历史，在最前面添加系统提示
 		messages := []Message{
 			{
 				Role:    "system",
 				Content: c.buildSystemPrompt(),
 			},
-			{
-				Role:    "user",
-				Content: userMessage,
-			},
 		}
+		// 添加历史消息
+		messages = append(messages, historyMessages...)
 
 		// 创建 OpenAI 客户端
 		openaiClient := NewOpenAIClient(c.config)
@@ -399,7 +409,7 @@ func (c *Client) ChatWithToolsAndStream(ctx context.Context, userMessage string)
 
 			// 执行所有工具调用
 			for _, toolCall := range result.ToolCalls {
-				responseCh <- fmt.Sprintf("\n🔧 调用工具: **%s**\n", toolCall.Function.Name)
+				responseCh <- fmt.Sprintf("\n> 🔧 调用工具: **%s**\n", toolCall.Function.Name)
 
 				// 执行工具调用
 				toolResult, err := c.executeToolCall(ctx, toolCall)
